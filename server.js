@@ -71,7 +71,7 @@ async function resolveShortLink(startUrl) {
     const timer = setTimeout(() => controller.abort(), 4500);
     let response;
     try {
-      response = await fetch(current, { method: 'GET', redirect: 'manual', signal: controller.signal, headers: { 'user-agent': 'VideoSave-LinkInspector/0.8', 'range': 'bytes=0-0' } });
+      response = await fetch(current, { method: 'GET', redirect: 'manual', signal: controller.signal, headers: { 'user-agent': 'VideoSave-LinkInspector/0.9', 'range': 'bytes=0-0' } });
     } finally { clearTimeout(timer); }
     if ([301,302,303,307,308].includes(response.status)) {
       const location = response.headers.get('location');
@@ -91,15 +91,47 @@ function decodeHtml(value) {
   return String(value || '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;|&#x27;/gi, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n))).replace(/&#x([\da-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)));
 }
 function getMeta(html, keys) {
+  // HTML attribute order is not fixed; parse each meta tag independently.
+  const tags = html.match(/<meta\b[^>]*>/gi) || [];
   for (const key of keys) {
-    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const patterns = [new RegExp(`<meta\\b[^>]*(?:property|name)=["']${escaped}["'][^>]*content=["']([^"']*)["'][^>]*>`, 'i'), new RegExp(`<meta\\b[^>]*content=["']([^"']*)["'][^>]*(?:property|name)=["']${escaped}["'][^>]*>`, 'i')];
-    for (const re of patterns) { const m = html.match(re); if (m) return decodeHtml(m[1].trim()); }
+    for (const tag of tags) {
+      const attrs = {};
+      for (const m of tag.matchAll(/([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g)) {
+        attrs[m[1].toLowerCase()] = m[2] ?? m[3] ?? m[4] ?? '';
+      }
+      if ((attrs.property || '').toLowerCase() === key.toLowerCase() || (attrs.name || '').toLowerCase() === key.toLowerCase()) {
+        return decodeHtml(attrs.content || '').trim();
+      }
+    }
   }
   return '';
 }
+function readJsonLd(html) {
+  const scripts = html.match(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script>/gi) || [];
+  for (const script of scripts) {
+    const raw = script.replace(/^<script\b[^>]*>/i, '').replace(/<\/script>$/i, '').trim();
+    try {
+      const parsed = JSON.parse(raw);
+      const nodes = Array.isArray(parsed) ? parsed : [parsed];
+      for (const node of nodes) {
+        const item = node?.['@graph'] ? [...(Array.isArray(node['@graph']) ? node['@graph'] : [node['@graph']])] : [node];
+        for (const entry of item) {
+          if (!entry || typeof entry !== 'object') continue;
+          const author = typeof entry.author === 'string' ? entry.author : entry.author?.name;
+          const image = typeof entry.image === 'string' ? entry.image : Array.isArray(entry.image) ? (typeof entry.image[0] === 'string' ? entry.image[0] : entry.image[0]?.url) : entry.image?.url;
+          if (entry.name || entry.headline || author || image) return { title: entry.name || entry.headline || '', author: author || '', image: image || '' };
+        }
+      }
+    } catch { /* malformed or non-JSON public structured data is ignored */ }
+  }
+  return {};
+}
+function allowedPlatformHost(hostname) {
+  return allHosts.some(h => hostname === h || hostname.endsWith(`.${h}`));
+}
+
 async function fetchPublicMetadata(pageUrl) {
-  const allowed = allHosts.some(h => pageUrl.hostname === h || pageUrl.hostname.endsWith(`.${h}`));
+  const allowed = allowedPlatformHost(pageUrl.hostname);
   if (!allowed) return { available: false, reason: '最终页面域名不在已配置的平台范围内，暂不请求页面信息。' };
   let current = pageUrl;
   for (let hop = 0; hop <= 3; hop++) {
@@ -108,7 +140,7 @@ async function fetchPublicMetadata(pageUrl) {
     const timer = setTimeout(() => controller.abort(), 5000);
     let response;
     try {
-      response = await fetch(current, { redirect: 'manual', signal: controller.signal, headers: { 'user-agent': 'VideoSave-MetadataPreview/0.8', accept: 'text/html,application/xhtml+xml' } });
+      response = await fetch(current, { redirect: 'manual', signal: controller.signal, headers: { 'user-agent': 'VideoSave-MetadataPreview/0.9', accept: 'text/html,application/xhtml+xml' } });
     } catch (e) {
       return { available: false, reason: e.name === 'AbortError' ? '页面信息请求超时。' : '暂时无法访问公开页面。' };
     } finally { clearTimeout(timer); }
@@ -117,6 +149,7 @@ async function fetchPublicMetadata(pageUrl) {
       if (!location || hop === 3) return { available: false, reason: '页面继续跳转或跳转次数过多，已停止获取信息。' };
       const next = normalizeHttpUrl(new URL(location, current).toString());
       if (!next) return { available: false, reason: '页面跳转地址无效。' };
+      if (!allowedPlatformHost(next.hostname)) return { available: false, reason: '页面跳转到了未配置的平台域名，已停止读取。', status: 'blocked_redirect' };
       current = next; continue;
     }
     const type = response.headers.get('content-type') || '';
@@ -132,19 +165,21 @@ async function fetchPublicMetadata(pageUrl) {
       }
     } catch { return { available: false, reason: '读取页面信息时连接中断。' }; }
     const html = new TextDecoder('utf-8').decode(Buffer.concat(chunks));
-    const title = getMeta(html, ['og:title', 'twitter:title']) || decodeHtml((html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [,''])[1].replace(/<[^>]+>/g, '').trim());
-    const image = getMeta(html, ['og:image', 'twitter:image']);
-    const author = getMeta(html, ['author', 'og:article:author']);
+    const structured = readJsonLd(html);
+    const title = getMeta(html, ['og:title', 'twitter:title']) || structured.title || decodeHtml((html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [,''])[1].replace(/<[^>]+>/g, '').trim());
+    const image = getMeta(html, ['og:image', 'og:image:url', 'twitter:image']) || structured.image || '';
+    const author = getMeta(html, ['author', 'article:author', 'og:article:author']) || structured.author || '';
     let cover = '';
-    if (image) { try { const u = new URL(image, current); if (['http:', 'https:'].includes(u.protocol)) cover = u.toString(); } catch {} }
-    return { available: Boolean(title || cover || author), title: title.slice(0, 300), cover, author: author.slice(0, 120), sourceUrl: current.toString(), reason: title || cover || author ? null : '页面没有提供可读取的公开标题、封面或作者信息。' };
+    if (image) { try { const u = new URL(image, current); if (['http:', 'https:'].includes(u.protocol) && allowedPlatformHost(u.hostname)) cover = u.toString(); } catch {} }
+    const found = Boolean(title || cover || author);
+    return { available: found, status: found ? 'partial' : 'not_found', title: title.slice(0, 300), cover, author: author.slice(0, 120), sourceUrl: current.toString(), reason: found ? '已读取页面提供的部分公开信息。' : '页面没有提供可读取的公开标题、封面或作者信息；平台可能要求登录或使用动态加载。' };
   }
   return { available: false, reason: '无法获取公开页面信息。' };
 }
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, name: 'VideoSave', version: '0.8.0', timestamp: new Date().toISOString() }));
+app.get('/api/health', (_req, res) => res.json({ ok: true, name: 'VideoSave', version: '0.9.0', timestamp: new Date().toISOString() }));
 app.get('/api/platforms', (_req, res) => res.json({ platforms: platforms.map(({ id, name, mode, status }) => ({ id, name, mode, status })) }));
-app.get('/api/benefits', (_req, res) => res.json({ version: '0.8.0', free: { enabled: true }, rewardedAd: { enabled: false, reason: '广告 SDK 与平台审核尚未完成' }, vip: { enabled: false, reason: '支付、订单和用户系统尚未接入' } }));
+app.get('/api/benefits', (_req, res) => res.json({ version: '0.9.0', free: { enabled: true }, rewardedAd: { enabled: false, reason: '广告 SDK 与平台审核尚未完成' }, vip: { enabled: false, reason: '支付、订单和用户系统尚未接入' } }));
 app.post('/api/inspect', async (req, res) => {
   const input = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
   if (!input || input.length > 8000) return res.status(400).json({ error: '请粘贴有效的分享文案或链接（最多 8000 个字符）。' });
@@ -164,7 +199,7 @@ app.post('/api/inspect', async (req, res) => {
   const metadata = await fetchPublicMetadata(finalUrl);
   res.json({
     ok: true,
-    version: '0.8.0',
+    version: '0.9.0',
     extractedUrl: original.toString(),
     hostname: original.hostname,
     platform: originalPlatform.name,
