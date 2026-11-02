@@ -1,6 +1,6 @@
 {
   "name": "videosave-05-starter",
-  "version": "0.5.0",
+  "version": "0.5.2",
   "private": true,
   "description": "VideoSave backend starter with platform detection and safe integration points",
   "type": "module",

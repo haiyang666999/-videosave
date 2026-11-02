@@ -33,15 +33,23 @@ function platformFor(hostname) {
 }
 
 function normalizeHttpUrl(input) {
+  // Mobile share sheets often paste a sentence plus a URL, not just the URL.
+  // Extract the first HTTP(S) URL and ignore common trailing punctuation.
+  const text = String(input || "").trim();
+  const match = text.match(/https?:\/\/[^\s<>"“”‘’]+/i) ||
+    text.match(/(?:^|\s)((?:www\.)?[a-z0-9.-]+\.[a-z]{2,}\/[^\s<>"“”‘’]*)/i);
+  if (!match) return null;
+  let candidate = (match[1] || match[0]).replace(/[，。！？、；;,.!?)）】》]+$/u, "");
+  if (!/^https?:\/\//i.test(candidate)) candidate = `https://${candidate}`;
   let parsed;
-  try { parsed = new URL(input); } catch { return null; }
+  try { parsed = new URL(candidate); } catch { return null; }
   if (!["http:", "https:"].includes(parsed.protocol)) return null;
   if (parsed.username || parsed.password) return null;
   return parsed;
 }
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, name: "VideoSave", version: "0.5.0", timestamp: new Date().toISOString() });
+  res.json({ ok: true, name: "VideoSave", version: "0.5.2", timestamp: new Date().toISOString() });
 });
 
 app.get("/api/platforms", (_req, res) => {
@@ -88,5 +96,5 @@ app.get("/api/auth/:platform/start", (req, res) => {
 app.get("*", (_req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
 app.listen(PORT, () => {
-  console.log(`VideoSave 0.5 running at http://localhost:${PORT}`);
+  console.log(`VideoSave 0.5.2 running at http://localhost:${PORT}`);
 });
