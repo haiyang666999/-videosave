@@ -1,6 +1,6 @@
-# VideoSave 0.7.0
+# VideoSave 0.8.0
 
-Node.js 18+ / Express. This release improves share-text URL extraction and attempts limited redirects for an explicit allowlist of public short-link hosts.
+Node.js 18+ / Express. This version adds a cautious public-page metadata preview to the 0.7.0 link inspection flow.
 
 ## Run
 
@@ -10,14 +10,14 @@ npm start
 ```
 
 ## API
+
 - `GET /api/health` — service version/status
 - `GET /api/platforms` — supported platform recognition list
 - `GET /api/benefits` — current entitlement integration status (ads/VIP remain disabled)
-- `POST /api/inspect` with `{ "url": "share text or URL" }` — extract first HTTP(S) URL, identify platform, and attempt short-link resolution for configured short hosts
+- `POST /api/inspect` with `{ "url": "share text or URL" }` — extract URL, identify platform, attempt configured short-link resolution, then attempt to read public HTML metadata (title, image, author) for configured platform hosts.
 
-## Security and scope
+## Metadata limits
 
-- Redirect resolution is limited to an explicit short-host allowlist, five hops, a timeout, and public-IP checks to reduce SSRF risk.
-- This is link inspection only. It does not fetch video media, bypass platform restrictions, or guarantee metadata availability.
-- Ad SDK, payments, account identity, and VIP entitlements are not implemented.
-- Only use official APIs, creator exports, user-authorized content, or other permitted sources. Never bypass DRM, private content, paywalls, or creator download settings.
+Only HTML page metadata is inspected. The request is limited to configured platform hosts, public-IP checks, a small redirect limit, a timeout, and a 1 MiB response cap. Platforms may block anonymous access or omit metadata; an unavailable result is normal. This is not a media downloader and does not retrieve video files.
+
+Ad SDK, payments, account identity, and VIP entitlements are not implemented. Only use official APIs, creator exports, user-authorized content, or other permitted sources. Never bypass DRM, private content, paywalls, or creator download settings.

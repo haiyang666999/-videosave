@@ -71,7 +71,7 @@ async function resolveShortLink(startUrl) {
     const timer = setTimeout(() => controller.abort(), 4500);
     let response;
     try {
-      response = await fetch(current, { method: 'GET', redirect: 'manual', signal: controller.signal, headers: { 'user-agent': 'VideoSave-LinkInspector/0.7', 'range': 'bytes=0-0' } });
+      response = await fetch(current, { method: 'GET', redirect: 'manual', signal: controller.signal, headers: { 'user-agent': 'VideoSave-LinkInspector/0.8', 'range': 'bytes=0-0' } });
     } finally { clearTimeout(timer); }
     if ([301,302,303,307,308].includes(response.status)) {
       const location = response.headers.get('location');
@@ -86,9 +86,65 @@ async function resolveShortLink(startUrl) {
   return { url: current.toString(), resolved: current.toString() !== startUrl.toString(), hops: 5, note: '已达到最大跳转次数，停止继续解析' };
 }
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, name: 'VideoSave', version: '0.7.0', timestamp: new Date().toISOString() }));
+
+function decodeHtml(value) {
+  return String(value || '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;|&#x27;/gi, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n))).replace(/&#x([\da-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)));
+}
+function getMeta(html, keys) {
+  for (const key of keys) {
+    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const patterns = [new RegExp(`<meta\\b[^>]*(?:property|name)=["']${escaped}["'][^>]*content=["']([^"']*)["'][^>]*>`, 'i'), new RegExp(`<meta\\b[^>]*content=["']([^"']*)["'][^>]*(?:property|name)=["']${escaped}["'][^>]*>`, 'i')];
+    for (const re of patterns) { const m = html.match(re); if (m) return decodeHtml(m[1].trim()); }
+  }
+  return '';
+}
+async function fetchPublicMetadata(pageUrl) {
+  const allowed = allHosts.some(h => pageUrl.hostname === h || pageUrl.hostname.endsWith(`.${h}`));
+  if (!allowed) return { available: false, reason: '最终页面域名不在已配置的平台范围内，暂不请求页面信息。' };
+  let current = pageUrl;
+  for (let hop = 0; hop <= 3; hop++) {
+    await assertPublicHost(current.hostname);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    let response;
+    try {
+      response = await fetch(current, { redirect: 'manual', signal: controller.signal, headers: { 'user-agent': 'VideoSave-MetadataPreview/0.8', accept: 'text/html,application/xhtml+xml' } });
+    } catch (e) {
+      return { available: false, reason: e.name === 'AbortError' ? '页面信息请求超时。' : '暂时无法访问公开页面。' };
+    } finally { clearTimeout(timer); }
+    if ([301,302,303,307,308].includes(response.status)) {
+      const location = response.headers.get('location');
+      if (!location || hop === 3) return { available: false, reason: '页面继续跳转或跳转次数过多，已停止获取信息。' };
+      const next = normalizeHttpUrl(new URL(location, current).toString());
+      if (!next) return { available: false, reason: '页面跳转地址无效。' };
+      current = next; continue;
+    }
+    const type = response.headers.get('content-type') || '';
+    if (!response.ok || !/text\/html|application\/xhtml\+xml/i.test(type)) return { available: false, reason: '平台未提供可读取的公开网页信息。' };
+    const reader = response.body?.getReader();
+    if (!reader) return { available: false, reason: '无法读取页面内容。' };
+    const chunks = []; let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read(); if (done) break;
+        total += value.length; if (total > 1024 * 1024) { await reader.cancel(); return { available: false, reason: '页面内容超过安全读取上限。' }; }
+        chunks.push(value);
+      }
+    } catch { return { available: false, reason: '读取页面信息时连接中断。' }; }
+    const html = new TextDecoder('utf-8').decode(Buffer.concat(chunks));
+    const title = getMeta(html, ['og:title', 'twitter:title']) || decodeHtml((html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [,''])[1].replace(/<[^>]+>/g, '').trim());
+    const image = getMeta(html, ['og:image', 'twitter:image']);
+    const author = getMeta(html, ['author', 'og:article:author']);
+    let cover = '';
+    if (image) { try { const u = new URL(image, current); if (['http:', 'https:'].includes(u.protocol)) cover = u.toString(); } catch {} }
+    return { available: Boolean(title || cover || author), title: title.slice(0, 300), cover, author: author.slice(0, 120), sourceUrl: current.toString(), reason: title || cover || author ? null : '页面没有提供可读取的公开标题、封面或作者信息。' };
+  }
+  return { available: false, reason: '无法获取公开页面信息。' };
+}
+
+app.get('/api/health', (_req, res) => res.json({ ok: true, name: 'VideoSave', version: '0.8.0', timestamp: new Date().toISOString() }));
 app.get('/api/platforms', (_req, res) => res.json({ platforms: platforms.map(({ id, name, mode, status }) => ({ id, name, mode, status })) }));
-app.get('/api/benefits', (_req, res) => res.json({ version: '0.7.0', free: { enabled: true }, rewardedAd: { enabled: false, reason: '广告 SDK 与平台审核尚未完成' }, vip: { enabled: false, reason: '支付、订单和用户系统尚未接入' } }));
+app.get('/api/benefits', (_req, res) => res.json({ version: '0.8.0', free: { enabled: true }, rewardedAd: { enabled: false, reason: '广告 SDK 与平台审核尚未完成' }, vip: { enabled: false, reason: '支付、订单和用户系统尚未接入' } }));
 app.post('/api/inspect', async (req, res) => {
   const input = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
   if (!input || input.length > 8000) return res.status(400).json({ error: '请粘贴有效的分享文案或链接（最多 8000 个字符）。' });
@@ -105,19 +161,21 @@ app.post('/api/inspect', async (req, res) => {
   }
   const finalUrl = normalizeHttpUrl(resolution.url) || original;
   const finalPlatform = platformFor(finalUrl.hostname);
+  const metadata = await fetchPublicMetadata(finalUrl);
   res.json({
     ok: true,
-    version: '0.7.0',
+    version: '0.8.0',
     extractedUrl: original.toString(),
     hostname: original.hostname,
     platform: originalPlatform.name,
     platformId: originalPlatform.id,
     status: originalPlatform.status,
     supportedPath: originalPlatform.mode,
+    metadata,
     resolution: { attempted: shortHosts.has(original.hostname.toLowerCase()), resolved: resolution.resolved, hops: resolution.hops, finalUrl: finalUrl.toString(), finalHostname: finalUrl.hostname, finalPlatform: finalPlatform.name, note: resolutionError || resolution.note || null },
     message: '链接识别完成。短链接解析仅用于定位公开内容地址，不代表已获得视频下载权限。',
     policy: '仅处理你拥有或获准使用的内容；不会绕过私密权限、DRM、付费墙或作者关闭的下载设置。'
   });
 });
 app.get('*', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
-app.listen(PORT, () => console.log(`VideoSave 0.7.0 listening on ${PORT}`));
+app.listen(PORT, () => console.log(`VideoSave 0.8.0 listening on ${PORT}`));
